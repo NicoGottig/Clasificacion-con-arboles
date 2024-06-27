@@ -1,0 +1,4 @@
+modelo	auc_mean	auc_sd
+LGBM c/variabes transformadas.	0.7730707234390242	0.03565175220948293
+LGBM Est. c/variabes transformadas.	0.7713112583791963	0.033305933912491516
+LGBM Est. sin variables transformadas	0.7182887670788125	0.03000237598455097

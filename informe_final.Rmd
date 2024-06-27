@@ -1,0 +1,1089 @@
+---
+title: "**Clasificación de deudores con datos del BCRA**"
+subtitle: "Estadística Computacional - Maestría en Estadística Aplicada"
+author: "Nicolás Gottig"
+date: "Junio - 2024"
+geometry: 
+  - top=2cm
+  - bottom=2cm
+  - left=2cm
+  - right=2cm
+  
+documentclass: article
+# bibliography: bibliografia.bib
+link-citations: yes
+biblio-style: "apa"
+header-includes:
+
+  - \usepackage{titling}
+  - \usepackage{setspace} # Agregar el paquete setspace para el interlineado
+  - \setstretch{1.15}    # Establecer el interlineado en 1.15
+
+  - \pretitle{\begin{center}\LARGE\includegraphics[width=4cm]{Logo-Unr-1.png}\\[\bigskipamount]}
+  - \posttitle{\end{center}}
+  
+  - \renewcommand{\figurename}{Figura}
+
+output: 
+  pdf_document: 
+    latex_engine: xelatex
+
+# mainfont: Noto
+
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = F, warning = F, message = FALSE, fig.align = "center", out.height = "50%", out.width = "50%")
+
+# Herramientas de descriptiva y manipulación
+library(tidyverse)
+library(naniar)
+library(knitr)
+library(gridExtra)
+
+# Modelos y ML
+library(rpart)
+library(rpart.plot) 
+library(partykit)
+# install.packages("CHAID", repos="http://R-Forge.R-project.org")
+library(CHAID)
+library(gbm)
+library(xgboost)
+library(lightgbm)
+library(caret)
+library(tidymodels)
+library(pROC)
+library(Metrics)
+
+# Funciones y fuentes
+source("funciones_utiles.R")
+library(extrafont)
+library(ggtext)
+library(showtext)
+showtext_auto()
+
+# Formato de gráficos
+  theme_set(
+    theme_bw() +
+      theme(
+        plot.title = element_text(face = "bold", hjust = 0.5, size = 11),
+        legend.position = "bottom", 
+        text = element_text(size = 11, family = "Crimson Text"),
+        axis.text.x = element_text(size = 11),
+        strip.text = element_text(color = "black"),
+        strip.background = element_blank()
+      )
+  )
+  
+mate_pal <- c("#3B5998", "#FFA500", "#6B8E23", "#A52A2A", "#8A2BE2", "#DAA520", "#708090")
+
+df <- read_delim("Data/deudores_limpio.txt", delim = "\t")
+df_transformado <- read_delim("Data/deudores_limpio_transformaciones.txt", delim = "\t")
+
+df$max_sit_mes_sin_garantia <- NULL
+df$tipo_persona <- factor(df$tipo_persona)
+df_transformado$max_sit_mes_sin_garantia <- NULL
+df_transformado$tipo_persona <- factor(df_transformado$tipo_persona)
+
+```
+
+## Motivación
+
+El Banco Central de la República Argentina (BCRA) publica mensualmente un informe consolidado de deudas actuales e históricas (24 meses), denominado 'Central de Deudores del Sistema Financiero' elaborado en función de los datos recibidos de distintos tipos de entidades financieras. Cada deuda informada al BCRA es acompañada de su situación que es una aproximación a la cantidad de días de atraso en el cumplimiento de pago (situación 1, 2, 3, etc..). Siendo sit. 1 y 2 situacion normal y riesgo bajo, 3 riesgo medio, 4 alto, 5 irrecuperable y 6 irrecuperable por disposición técnica.  
+Se cuenta con una muestra aleatoria de cuits de personas físicas que tenían al menos una de deuda en el sistema financiero en junio de 2019 y sus características crediticias entre dic-2018 y jun-2019, su estado de deuda en jun-2019 y si el cuit está en situación 3 o superior en todas las deudas del cuit entre Jul-2019 y Jun-2020, en ese caso se lo clasifica como caso de default.  
+En el informe se describen las características generales del conjunto de datos, además se ajustan y comparan algoritmos basados en árboles CART y CHAID, luego se los compara con regresión logística stepwise como método de clasificación tradicional, y con modelos basados en Bagging y Boosting, concretamente el algoritmo Random Forest, el algoritmo XGBoost y el algoritmo LightGBM, itinerando a través de sus parámetros.  
+Por último, se describen las medidas de clasificación de los modelos, seleccionando uno y optimizando el punto de clasificación a través de una función de costo.   
+
+## Análisis descriptivo 
+Algunas consideraciones:  
+
+* Se reagruparon los cuits que empiezan con 23 o 24 en una única categoría "global" para facilitar la interpretación en el análisis descriptivo y porque la categoría *24* tiene sólo 90 casos.  
+
+* Sólo hay valores nulos en la maxima situación de deudas garantizadas y no garantizadas. En las garantizadas hay muchos más valores nulos porque sólo el 1.9 % del total de cuits tiene garantías. Se decide eliminar la variable 'max_sit_mes_con_garantía' que tiene el 97.3 % de los casos nulos y la variable 'max_sit_mes_sin_garantia' dado que algunos modelos tuvieron problemas de convergencia, y es preferible a eliminar los casos pudiendo sesgar los parámetros.   
+
+* Hay 2 personas extranjeras que no se consideran en el análisis (DNI 60 millones) por su escaza participación relativa en el conjunto de datos.
+
+* Se eliminan los registros con igual fecha que la variable respuesta: *peor_situacion_respuesta y mora_mayor_30_dias*.  
+
+* Si se elimina la columna 'id_individuo' hay 13 casos repetidos que son eliminados del análisis.
+
+* Se crean variables auxiliares para identificar si el cuit tuvo alguna vez default histórico (dic-2018 a jun-2019): *tiene_default_historico* que toma valor 1 si lo tuvo y 0 si no lo tuvo. También se crea la variable *'tiene_garantia_histórica'* que toma valor 1 si la persona tuvo una proporción mayor a 0 de deuda garantizada histórica y 0 si no lo tuvo.
+
+* Se considerarán las variables expresadas en pesos para el análisis descriptivo pero se eliminarán en los modelos, conservando solo la proporción media en nivel 1, 2, etc... sobre el total. Dado que los montos en pesos son demasiado variantes en el tiempo, por lo que no son buenos predictores para futuros casos de mora.  
+
+* Para el ajuste de los modelos también se eliminan las variables registradas el mes inmediato anterior al default, con el objetivo de tener información histórica y que el estado inmediato anterior a la observación de default no condicione la regla de decisión. Las variables eliminadas son *n_deudas_actual, situacion_mes_actual, tiene_garantia_actual, mora_30_dias_mes_actual*
+
+### Características generales de los CUIT  
+  
+```{r, fig.cap = "Relación entre default, prop. de default, situación 1 y 2."}
+df %>% 
+  select( default, media_prop_default , media_prop_situacion_1, media_prop_situacion_2) %>% 
+  pivot_longer(-c( default, media_prop_default), values_to = "val", names_to = "name") %>% 
+  ggplot(aes(x = val, y = media_prop_default, color = factor(default))) +
+  geom_point(size = 2) +
+  ylab("Media prop. default") +
+  guides(color = guide_legend(title="Default (1 indica positivo)")) +
+  xlab("") +
+  geom_smooth(method = "lm", se = FALSE) +
+  facet_wrap(~ name, scales = "free") +
+  scale_color_manual(values = mate_pal)
+
+```
+
+Del total de 18006 casos, el 8.7 % estuvo situación crediticia más grave mayor o igual 3 en todas las deudas (default). Sólo el 1.9 % tuvo deuda garantizada a jun-2019 y el 4.2 % tuvo alguna proporción de deuda más grave mayor o igual a 3 entre Dic-2018 y Jun-2019.  
+Se observan correlaciones esperadas entre las variables. Por ejemplo, para los casos que en algún momento estuvieron en default, la proporción de deuda en default está fuertemente correlacionada (linealmente) de forma inversa con la proporción de deuda en etapa 1, aunque está muy débilmente correlacionada de forma directa con la proporción de deuda en etapa 2 (figura 1). 
+```{r, fig.cap = "Casos de default, montos de deuda y situaciones generales"}
+df %>% 
+  select(tipo_persona, default, media_prop_situacion_1, media_prop_situacion_2, media_deuda_total, media_deuda_con_garantia, media_deuda_sin_garantia) %>% 
+  pivot_longer(-c(tipo_persona, default), names_to = "indicador", values_to = "valor") %>% 
+  group_by(default, tipo_persona, indicador) %>% 
+  summarise(mean = mean(valor)) %>% 
+  ggplot() +
+  aes(x = tipo_persona, group = default, fill = factor(default), y = mean) +
+  geom_col(position = position_dodge(width = 0.9)) +  # Usar position_dodge para que las barras estén una al lado de la otra
+  guides(fill = guide_legend(title="Default (1 indica positivo)")) +
+  facet_wrap(~indicador, scales = "free") +
+  scale_fill_manual(values = mate_pal) +
+  xlab("Inicio CUIT") +
+  ylab("Promedio de deuda")
+```
+
+Las relaciones entre los casos de default y los créditos seguros son distintas respecto a los montos solicitados y la participación relativa en cada situación. Aunque no se observan, a priori, importantes clasificadores en las características observadas en cada tipo de cuit (excepto la media de la proporción de la situación 2 sobr el total de créditos). Los promedios de deuda desagregados por tipo de persona y situación de falta (figura 2), indican que los casos que cayeron en default tienden a endeudarse por montos mayores.  
+La deuda con garantía en general es menor, representando en promedio alrededor del 5 % del total de la deuda. Sin embargo, la tendencia es igual; excepto en los cuit iniciados en 20, cuya media garantizada es notablemente mayor en aquellos casos que no cayeron en situación de falta. En otras palabras: los cuit iniciados en 20 están asociados a mayores montos bajo garantía.  
+
+```{r, fig.cap = "Relación entre características de default y tipo de persona"}
+df %>% 
+  select(media_prop_default, prop_default_seg, proxy_edad_actual, tipo_persona) %>% 
+  pivot_longer(-c(tipo_persona, media_prop_default), values_to = "val", names_to = "name") %>%
+  ggplot(aes(x = val, y = media_prop_default, color = tipo_persona)) +
+  geom_point(size = 2) +
+  ylab("Prop. Media de deuda en default a jun-2019s") +
+  guides(color = guide_legend(title="Tipo de persona")) +
+  xlab("") +
+  geom_smooth(method = "lm", se = FALSE) +
+  facet_wrap(~ name, scales = "free") +
+  scale_color_manual(values = mate_pal)
+
+```
+
+Por otro lado, no se observan tendencias notables respecto a las características etarias o de género respecto a la proporción de deuda en default histórico, o el default en el periodo de interés. Si es más notable la relación entre la proporción de deuda en default histórica (a junio del 2019) y la proporción de meses en los cuales el cuit estuvo en default. Sugiriendo, intuitivamente, que los malos historiales crediticios se sostienen en el tiempo (figura 3).  
+
+specto a las características de los CUIT que cayeron en default, se observa en la figura 4 que el algoritmo CART identifica a la proporción de deuda en situación 1 como el mejor clasificador.  
+
+Si la proporción de la media de deuda en la situación uno es mayor a 0.97, entonces se clasifica al cuit como cumplidor, representando el 89 % de los casos y una probabilidad de default del 0.05. Ahora bien, si no se cumple esta condición, la situación del mes actual es otro clasificador de falta. Si la situación fuese distinta a uno, la probabilidad de default es 0.62 (¡12 veces más grande!).  
+
+Si la situación en el mes actual efectivamente fuese situación uno, entonces dependería de la media de deuda en default. Si ésta es mayor a 8.2 mil, entonces la probabilidad de default es 0.55, 11 veces más grandes que si la proporción de la media de deuda en situación 1 es mayor a 0.97 y un 11 % menos que si la situación del mes actual fuese distinta a uno.   
+ 
+```{r, fig.cap = "Criterios de clasificación para casos de default"}
+formula <- formula(default ~ .)
+
+df$default <- factor(df$default, levels = c("0", "1"))
+# Arbol cart
+# cart_ejemplo <- rpart(formula = formula, data = df)
+# save(cart_ejemplo,file = "Modelos/cart_ejemplo.RData")
+load("Modelos/cart_ejemplo.RData")
+rpart.plot(cart_ejemplo)
+
+```
+
+## Comparación de modelos CART y CHAID
+Se eliminan todas las variables medidas en miles de pesos (dadas las características económicas del país y su rápido efecto en la mesura de los créditos obtenidos en el tiempo) y las variables observadas el mes anterior al default. Se itera sobre los parámetros *cp* que determina la complejidad del modelo en el caso del algoritmo CART y sobre valores de alpha para el algoritmo CHAID (previamente se categorizan todas las variables continuas en deciles).   
+
+Además, se divide el conjunto de datos en un conjunto de entrenamiento (70 %) uno de prueba (20 %) con el que se buscarán los mejores parámetros y uno de validación (10 %) con el que se expondrán los resultados finales.  
+
+```{r Eliminiación de variables}
+# Se borran las variables de plata
+variables_dinero <- c("deuda_total_actual",
+                      "deuda_con_garantia_actual",
+                      "media_deuda_total",
+                      "media_deuda_situacion_1",
+                      "media_deuda_situacion_2",
+                      "media_deuda_con_garantia",
+                      "media_deuda_sin_garantia",
+                      "media_deuda_en_default")
+
+variables_inmediatas <- c("n_deudas_actual", 
+                          "situacion_mes_actual",
+                          "tiene_garantia_actual",
+                          "mora_30_dias_mes_actual")
+
+df <- df %>% 
+  select(setdiff(colnames(df), variables_dinero)) 
+
+df <- df %>% 
+  select(setdiff(colnames(df), variables_inmediatas))
+```
+
+```{r train y test para todos los modelos}
+#  Division en train y test
+set.seed(123)
+train_index <- createDataPartition(df_transformado$default, p = 0.70, list = FALSE)
+train_data <- df_transformado[train_index, ]
+remaining_data <- df_transformado[-train_index, ]
+test_index <- createDataPartition(remaining_data$default, p = 2/3, list = FALSE)
+test_data <- remaining_data[test_index, ]
+validation_data <- remaining_data[-test_index, ]
+
+rm(train_index, remaining_data, test_index)
+
+train_data$default <- factor(train_data$default, levels = c("0", "1"))
+
+```
+
+En el algoritmo *CART* se itineró por distintos valores del parámetro de complejidad o *cp* y del número mínimo de observaciones requeridas en un nodo para que se realice una división o *minsplit*. Los resultados se validaron con el conjunto de prueba. El modelo final seleccionado es aquel con parámetros *cp=0.00, minsplit = 20* con un *auc = 0.705* en prueba y *auc = 0.712* en validación.  
+
+```{r arbol CART, fig.cap = "AUC para distintos valores de Cp y Minsplit"}
+formula <- formula(default ~ . )
+
+# Itero por distintos valores de cp_val y minsplit
+#  cart_cv <- NULL
+#  cp_val <- seq(0, 0.1, 0.002)
+#  minsplit <- c(200, 500, 20, 2)
+# 
+# for (i in minsplit) {
+#   for (j in cp_val) {
+# 
+#     cart_tmp <- rpart(formula,
+#                   data = train_data,
+#                   control = rpart.control(cp = j,
+#                                           minsplit = i))
+# 
+#     pred_tmp <- predict(cart_tmp, test_data, type = "prob")[, 2]
+#     roc_obj <- roc(response = test_data$default, predictor = pred_tmp)
+#     auc_value <- roc_obj$auc
+#     cart_cv <- rbind(cart_cv, data.frame(cp = j,
+#                                          ms = i,
+#                                          auc = auc_value))
+#   }
+# }
+# 
+# write_delim(cart_cv, "Data/cv_cart.txt", delim = "\t")
+# rm(cart_cv)
+cart_cv = read_delim("Data/cv_cart.txt", delim = "\t")
+# 
+# cart_final <- rpart(formula,
+#                     data = train_data,
+#                     control = rpart.control(cp = 0,
+#                                             minsplit = 20))
+# save(cart_final, file = "Modelos/cart_final.RData")
+
+load("Modelos/cart_final.RData")
+pred_cart <- predict(cart_final, validation_data, type = "prob")[, 2]
+# roc_obj <- roc(response = validation_data$default, predictor = pred_cart)
+
+cart_cv %>% 
+    ggplot() +
+    aes(x = cp, y = auc, color = factor(ms)) +
+    geom_line(linewidth = .80) +
+    scale_color_manual(values = mate_pal) +
+    xlab("CP") +
+    ylab("AUC") +
+    guides(color = guide_legend(title = "Minsplits")) + 
+  xlim(c(0,0.002)) +
+  ylim(c(0.7,0.72))
+
+```
+
+```{r arbol CHAID}
+
+columnas_a_categorizar = c("proxy_edad_actual",
+                      "prop_con_garantia_actual",
+                      "n_meses_seg_bcra",
+                      "media_prop_situacion_1",
+                      "media_prop_situacion_2",
+                      "media_prop_default",
+                      "media_prop_con_garantia",
+                      "prop_tuvo_garantia",
+                      "prop_mora_30_dias_seg",
+                      "prop_default_seg")
+
+pattern <- paste0("^(", paste(columnas_a_categorizar, collapse = "|"), ")")
+
+train_chaid <- train_data %>%
+  mutate(across(matches(pattern), ~ categorizar_deciles_columna(.))) %>%
+  mutate_if(is.numeric, as.factor) %>%
+  mutate_if(is.character, as.factor)
+
+
+# test_chaid <- test_data %>%
+#   mutate(across(matches(pattern), ~ categorizar_deciles_columna(.))) %>%
+#   mutate_if(is.numeric, as.factor) %>%
+#   mutate_if(is.character, as.factor)
+
+validation_chaid <- validation_data %>%
+  mutate(across(matches(pattern), ~ categorizar_deciles_columna(.))) %>%
+  mutate_if(is.numeric, as.factor) %>%
+  mutate_if(is.character, as.factor) 
+
+# ajuste_chaid <- function(alpha2, alpha3, alpha4){
+#   ctrl <- chaid_control(alpha2=alpha2, alpha3=alpha3, alpha4=alpha4)
+#   chaid_tmp <- chaid(formula, data = train_chaid, control = ctrl)
+#   pred_tmp <- predict(chaid_tmp, test_chaid, type = "prob")[, 2]
+#   roc_obj <- roc(response = test_chaid$default, predictor = pred_tmp)
+#   return(as.numeric(roc_obj$auc))
+# }
+
+# alphas <- expand.grid(alpha2 = c(0.01, 0.02, 0.05),
+#                       alpha3 = c(0.01, 0.03, 0.05),
+#                       alpha4 = c(0.01, 0.03, 0.05))
+
+# alphas <- alphas %>%
+#   filter(alpha2>alpha3)
+
+# alphas$auc <- map_dbl(1:nrow(alphas),
+#                       ~ajuste_chaid(alphas$alpha2[.x],
+#                                     alphas$alpha3[.x],
+#                                     alphas$alpha4[.x]))
+# 
+
+# ctrl <- chaid_control(alpha2=0.02, alpha3=0.01, alpha4=0.05)
+# chaid_final <- chaid(formula, data = train_chaid, control = ctrl)
+# save(chaid_final, file = "Modelos/chaid_final.RData")
+
+load("Modelos/chaid_final.RData")
+
+pred_chaid <- predict(object = chaid_final,
+                      newdata = validation_chaid,
+                      type = "prob")[, 2]
+# roc_obj <- roc(response = validation_chaid$default, predictor = pred_chaid)
+
+```
+
+En el algoritmo *CHAID* se itineró por distintos valores de los parámetros *alpha2, alpha3 y alpha4* (valores críticos para la separación o unión de categorías en la prueba Ji-2). Los resultados se validaron con el conjunto de prueba. El modelo final seleccionado es aquel con parámetros *alpha2 = 0.02, alpha3 = 0.01 y alpha4 = 0.05* con un *auc = 0.740* en prueba y *auc = 0.727* en validación. El resultado final de la calidad de clasificación, sobre el conjunto de validación, se encuentra en la tabla a continuación: 
+ 
+```{r metricas chaid y cart}
+chaid_y_cart <- calcular_metricas("CART", 
+                                  y_real = as.numeric(as.character(validation_data$default)),
+                                  y_prob = pred_cart,
+                                  cutoff = 0.087)
+
+chaid_y_cart <- rbind(chaid_y_cart, 
+                      calcular_metricas("CHAID", 
+                                  y_real = as.numeric(as.character(validation_chaid$default)),
+                                  y_prob = pred_chaid,
+                                  cutoff = 0.087))
+chaid_y_cart$AUC <- as.numeric(chaid_y_cart$AUC)
+
+chaid_y_cart <- chaid_y_cart %>% 
+  mutate(across(is.numeric, ~round(., digits = 3)))
+
+kable(chaid_y_cart, format = "markdown")
+
+```
+
+## Árboles combinados
+Para evitar el sobreajuste y el sesgo de los predictores más influyentes se hiperparametrizarán y ajustarán 3 modelos de ensamble: uno basado en el algoritmo Random Forest, uno a través del método de Gradient Boosting con el algoritmo XGBoost y el algoritmo LightGBM. Se compararán ademas con una regresión logística stepwise sin optimizar otros parámetros (como la regularización).  
+
+#### Regresión logística
+```{r regresión logistica, fig.cap="Efecto de las variables sobre las chances de default"}
+
+
+# # Modelo maximal
+# rl_full <- glm(default ~ . , 
+#                family = binomial(link = 'logit'), 
+#                data = train_data)
+# summary(rl_full)
+# 
+# # Modelo con intercepto
+# rl_intercepto <- glm(default ~ 1, 
+#                      family = binomial(link = 'logit'), 
+#                      data = train_data)
+# summary(rl_intercepto)
+# 
+# # Busco las mejores variables
+# fit_rl <- stats::step(
+#   rl_intercepto,
+#   scope = list(lower = rl_intercepto, upper = rl_full),
+#   direction = "both", # direction puede ser "both", "forward", "backward"
+#   trace = 0)
+# 
+# summary(fit_rl)
+
+# Mejor formula
+formula_logistica <- formula(default ~ prop_mora_30_dias_seg_sqrt+proxy_edad_actual_pot+prop_mora_30_dias_seg+n_meses_seg_bcra_sqrt+media_prop_situacion_2_sqrt+prop_default_seg_pot+tiene_garantia_historica+max_situacion_mes+media_prop_situacion_2+media_prop_situacion_2_pot+media_prop_con_garantia_sqrt)
+
+reg_lineal_final <- glm(formula_logistica,
+                        family = binomial(link = "logit"),
+                        data = train_data)
+
+coef_data <- tidy(reg_lineal_final, conf.int = TRUE, exponentiate = TRUE)
+coef_data <- coef_data %>% arrange(desc(abs(estimate)))
+
+# Crear el primer forest plot (top 5)
+plot1 <- ggplot(coef_data[1:5,], 
+                aes(x = reorder(term, estimate), 
+                    y = estimate)) +
+  geom_point(color = mate_pal[1]) +
+  geom_errorbar(aes(ymin = conf.low, 
+                    ymax = conf.high),
+                width = 0.2,
+                color = mate_pal[1]) +
+  labs(title = "Aumentan las chances de default (primeras 5)",
+       x = "Variables",
+       y = "Coef. e intervalos") +
+  coord_flip() + 
+  geom_hline(yintercept = 1, linetype = "dashed")
+
+# Crear el segundo forest plot (down 5)
+plot2 <- ggplot(coef_data[8:12,], aes(x = reorder(term, estimate), y = estimate)) +
+  geom_point(color = mate_pal[1]) +
+  geom_errorbar(color = mate_pal[1], 
+                aes(ymin = conf.low, ymax = conf.high), width = 0.2) +
+  labs(
+    title = "Disminuyen las chances de default (ultimas 5)",
+    x = "Variables",
+    y = "Coef. e intervalos"
+  ) +
+  coord_flip() +
+  geom_hline(yintercept = 1, linetype = "dashed")
+
+# Combinar los gráficos en una grilla de dos filas
+grid.arrange(plot1, plot2, nrow = 2)
+
+# Uno valores a dataframe de metricas
+metricas_finales <- rbind(chaid_y_cart, 
+                      calcular_metricas("REG.LOG.", 
+                                  y_real = as.numeric(as.character(validation_data$default)),
+                                  y_prob = predict(reg_lineal_final, newdata = validation_data, type = "response"),
+                                  cutoff = 0.087))
+
+```
+
+Se ajustó un modelo de regresión logística maximal y uno sólo con intercepto. A través de regresiones stepwise mediante la función step del paquete stats, que compara las variaciones en el AIC incluyendo y excluyendo variables, se detectó que el mejor modelo binomial es aquel que incluye un conjunto de variables originales y transformadas ordenadas por magnitud del efecto (figura 6).  
+
+|**variables relevantes**|  
+|-----------------------|
+| *media_prop_situacion_2_sqrt, prop_mora_30_dias_seg_sqrt, media_prop_situacion_2_pot, media_prop_con_garantia_sqrt, prop_default_seg_pot, max_situacion_mes, proxy_edad_actual_pot, n_meses_seg_bcra_sqrt, tiene_garantia_historica, prop_mora_30_dias_seg, (Intercept), media_prop_situacion_2*|
+
+Como descripción general, la raíz cuadrada de la proporción de deuda en situación 2 en el semestre previo es un gran determinante del default, habiendo 196 veces más chances de no pagar. En segundo lugar, el cuadrado de la proporción de meses con default en el semestre pasado aumenta en 38 veces las chances de no pagar.
+El efecto de la edad, aunque es significativamente distinto de 1 en términos probabilísticos, tiene un efecto muy poco notable en las chances de no pagar, mientras que haber tenido garantía en el semestre previo reduce las chances de caer en default en un 79 %.
+
+#### Random forest 
+A continuación se buscan los mejores hiperparámetros para el algoritmo Random Forest, variando en *Mtry*: La cantidad de regresores aleatorios a utilizar en cada arbol. *Trees*:  La cantidad de árboles en cada iteración y *Min_n*: La cantidad mínima de datos que requiere cada nodo para dividirse. 
+Se añaden además dos variables uniformes aleatorias que varían entre [0,1] y [2,5], para compararlas con el efecto del resto de las variables. Dada la relevancia de estas variables en las primeras iteraciones, se modificó el parámetro *maxnodes* (cantidad de nodos terminales) para evitar el sobreajuste.  
+
+```{r RANDOM FOREST FUERTE - dejar corriendo}
+
+# Hiperparametrización del cubo latino para búsqueda de los mejores parámetros
+
+# Defino K-fold
+# folds <- vfold_cv(train_data, strata = default, v = 5)
+
+# Defino Receta
+# recipe <- recipe(default ~ ., data = train_data) %>%
+#   step_mutate(default =
+#                 if_else(default == 1, "Yes", "No") %>%
+#                 factor(levels = c("Yes", "No"))) %>%
+#   step_dummy(all_nominal_predictors())
+
+# Defino modelo y parámetros a tunear
+# rf_spec <- rand_forest(
+#   mtry = tune(),
+#   trees = tune(),
+#   min_n = tune()) %>%
+#   set_engine(
+#     "ranger",
+#     num.threads = 7,
+#     importance = "impurity") %>%
+#   set_mode("classification")
+
+# Defino el flujo de trabajo
+# rf_Wf <- workflow() %>%
+#   add_recipe(recipe) %>%
+#   add_model(rf_spec)
+
+# Defino la grilla (en este caso tamaño 120)
+# rf_grid <- grid_latin_hypercube(
+#     min_n(),
+#     mtry(range = c(5, 37)),
+#     trees(),
+#     size = 300)
+
+# Defino cuantos nucleos podemos usar
+# parallel::detectCores() # Cantidad de cores
+# doParallel::registerDoParallel(cores = 5)
+
+# set.seed(123)
+# control <- control_grid(verbose = TRUE)
+# tune_res <- rf_Wf %>%
+#   tune_grid(
+#     resamples = folds, grid = rf_grid,
+#     metrics = metric_set(roc_auc, f_meas),
+#     control = control)
+
+# save(tune_res, file = "Data/tuning_rf.RData")
+```
+
+```{r fig.cap = "Distribución de las métricas en en los distintos parámetros"}
+load("Data/tuning_rf.RData")
+
+tune_res_df <- tune_res %>%
+  collect_metrics()
+
+colnames(tune_res_df)[4] <- "metric"
+# system("fc-list")
+
+# # Resultados: 
+tune_res_df %>%
+  select(mtry, trees, min_n, metric, mean) %>%
+  mutate(metric = if_else(metric == "f_meas", "F1 Promedio", "AUC")) %>%
+  pivot_longer(-c(metric, mean), names_to = "parametro", values_to = "valor") %>%
+  ggplot() +
+  aes(x = valor, y = mean, col = factor(if_else(metric == "AUC", round(mean, 2), NA_real_))) +
+  scale_color_manual(values = mate_pal) +
+  geom_point() +
+  facet_grid(metric ~ parametro, scales = "free") +
+  xlab("Valor del parámetro") +
+  ylab("Promedio de la métrica") +
+  theme(legend.position = "none")
+
+```
+
+En la figura 7 (los colores representan intervalos del AUC) se exponen 300 modelos con distintos hiperparámetros y sus resultados en FC y AUC. Es notable que menos variables mejoran la capacidad predictiva general (AUC), siendo el mejor modelo aquel con 5 variables. Los incrementos en la cantidad de datos necesarios para dividir un nodo también mejoran el AUC, mientras que la relación con la cantidad de árboles es menos distinguible. Se realiza una segunda iteración manteniendo fija la cantidad de variables:    
+
+```{r random forest inicial}
+set.seed(123)
+dft2 <- df_transformado
+dft2$UNIFORME1 <- runif(n = nrow(dft2),
+                        min = 0,
+                        max = 1)
+dft2$UNIFORME2 <- runif(n = nrow(dft2),
+                        min = 2,
+                        max = 5)
+
+train_index <- createDataPartition(dft2$default, p = 0.70, list = FALSE)
+train_data <- dft2[train_index, ]
+remaining_data <- dft2[-train_index, ]
+test_index <- createDataPartition(remaining_data$default, p = 2/3, list = FALSE)
+test_data <- remaining_data[test_index, ]
+validation_data <- remaining_data[-test_index, ]
+
+rm(train_index, remaining_data, test_index)
+
+train_data$default <- factor(train_data$default, levels = c("0", "1"), labels = c("0", "1"))
+
+# Comparo algunos árboles
+# rf_resultados <- function(mtry, trees, min_n, maxnodes){
+#   rf = randomForest::randomForest(
+#     formula = default ~ .,
+#     mtry = mtry,
+#     trees = trees,
+#     maxnodes = maxnodes,
+#     min_n = min_n,
+#     data = train_data
+#   )
+#   pred = predict(rf, test_data, type = "prob")[,2]
+#   as.numeric(pROC::auc(test_data$default, pred))
+# }
+
+# grid_rf = expand.grid(
+#   trees = c(300, 1200),
+#   mtry = 5,
+#   min_n = c(34, 100),
+#   maxnodes = c(10, 20, 30, 40, 50, 60, 70, 80, 90, 100, 110, 120, 130, 140, 150))
+
+# grid_rf$auc <- map_dbl(1:nrow(grid_rf),
+#                        ~rf_resultados(
+#                          mtry = grid_rf$mtry[.x],
+#                          trees = grid_rf$trees[.x],
+#                          min_n = grid_rf$min_n[.x],
+#                          maxnodes = grid_rf$maxnodes[.x]
+#                          ))
+
+# write_delim(grid_rf, "Data/random_forest_grid.txt", delim = "\t")
+grid_rf <- read_delim("Data/random_forest_grid.txt", delim = "\t")
+
+# Plot de las validaciones
+grid_rf %>% 
+  mutate(trees = paste0("Cant. Árboles: ", trees)) %>% 
+  ggplot(aes(x = maxnodes, y = auc, color = factor(min_n))) +
+  geom_line(linewidth = .8) +
+  geom_point(size = 2) +
+  scale_color_manual(values = mate_pal) +
+  xlab("maxnodes") +
+  ylab("AUC") +
+  facet_grid(~trees) + 
+  guides(color = guide_legend(title = "min_n: "))
+
+```
+
+```{r Random Forest modelo final}
+# rf_final = randomForest::randomForest(
+#   formula = default ~ .,
+#   mtry = 5,
+#   trees = 300,
+#   min_n = 100,
+#   max_nodes = 80,
+#   data = train_data)
+
+# save(rf_final, file = "Modelos/rf_final.RData")
+load("Modelos/rf_final.RData")
+
+# metricas_finales <- rbind(metricas_finales,
+#                       calcular_metricas("RAND.FOR.",
+#                                   y_real = as.numeric(as.character(validation_data$default)),
+#                                   y_prob = predict(rf_final, newdata = validation_data, type = "prob")[,2],
+#                                   cutoff = 0.087))
+
+# write_delim(metricas_finales, "Data/metricas_hasta_rf_tmp.txt", delim = "\t")
+
+metricas_finales <- read_delim("Data/metricas_hasta_rf_tmp.txt", delim = "\t")
+
+```
+
+```{r results = FALSE, include=FALSE}
+plot_rf <- randomForest::varImpPlot(rf_final, sort = TRUE, main = "", plot = FALSE) %>% 
+  data.frame()
+plot_rf$variable <- rownames(plot_rf)
+
+```
+
+Entonces se elije como modelo final el Random Forest con *mtry = 5, trees = 300, max_nodes = 80 y min_n = 100* aunque con *trees = 1200* el modelo parece más estable. Su *AUC = 0.764* en el conjunto de entrenamiento y *AUC = 0.741* en el conjunto de validación. Se puede observar además, que las variables randomizadas parecen tener una gran importancia en el modelo, esto puede ser producto del sobreajuste. 
+
+```{r variables relevantes, fig.cap = "Comparación de la relevancia de variables"}
+ggplot(plot_rf, aes(x = reorder(variable, -MeanDecreaseGini), y = MeanDecreaseGini)) +
+  geom_segment(aes(xend = reorder(variable, -MeanDecreaseGini), yend = 0), 
+               color = mate_pal[1], size = .8) +  # Líneas verticales
+  geom_point(color = mate_pal[2], size = 2) +  # Puntos en los extremos de las líneas
+  labs(
+    title = "Importancia de las variables",
+    x = "Variables",
+    y = "Importancia"
+  ) +
+  theme_minimal() +
+  theme(axis.text.x = element_text(angle = 90, hjust = 1))
+
+
+```
+
+#### Extreme Gradient Boosting (XGBoost)
+Este método construye modelos con buena capacidad predictiva a partir de modelos más débiles, reconociendo los errores de las iteraciones previas. En primer lugar se itineró sobre el *learning rate (eta)* y se obtuvo que el mejor es de 0.01. A partir de allí, se optimizaron los parámetros *nrounds* (cantidad de iteraciones), *max_depth* (La profundidad máxima de cada árbol), *subsample* (cantidad de observaciones incluidas en cada árbol) y *colsample_bytree* (La fracción de características que se utilizan para entrenar cada árbol).  
+
+Mientras que valores altos de algunos parámetros (nrounds o max_depth) pueden generar sobreajuste, parámetros como gamma o min_child_weight pueden reducirlo.  
+
+```{r adaptacion de los datos a XGBoost}
+#  Elimino variables añadidas para el rf
+train_data$UNIFORME1 = NULL
+train_data$UNIFORME2 = NULL
+
+test_data$UNIFORME1 = NULL
+test_data$UNIFORME2 = NULL
+
+validation_data$UNIFORME1 = NULL
+validation_data$UNIFORME2 = NULL
+
+# Modificaciones para XGBoost
+train_data <- train_data %>%
+  mutate_if(is.factor, as.numeric) %>%
+  mutate(es_27 = ifelse(tipo_persona == "27", 1,0),
+         es_20 = ifelse(tipo_persona == "20", 1,0)) %>%
+  select(-tipo_persona)
+
+test_data <- test_data %>%
+  mutate_if(is.factor, as.numeric) %>%
+  mutate(es_27 = ifelse(tipo_persona == "27", 1,0),
+         es_20 = ifelse(tipo_persona == "20", 1,0)) %>%
+  select(-tipo_persona)
+
+validation_data <- validation_data %>%
+  mutate_if(is.factor, as.numeric) %>%
+  mutate(es_27 = ifelse(tipo_persona == "27", 1,0),
+         es_20 = ifelse(tipo_persona == "20", 1,0)) %>%
+  select(-tipo_persona)
+
+# Con tidy
+if (any(train_data$default == 2)) {
+  train_data$default <- ifelse(train_data$default == 2, 1, 0)
+}
+
+indice_default <- which(colnames(train_data) == "default")
+
+train_x = as.matrix(train_data[, -indice_default])
+train_y = as.numeric(as.character(train_data$default))
+test_x  = as.matrix(test_data[, -indice_default])
+test_y  = as.numeric(as.character(test_data$default))
+val_x = as.matrix(validation_data[, -indice_default])
+val_y = as.numeric(as.character(validation_data$default))
+
+# # Crear el conjunto de datos DMatrix para XGBoost
+dtrain <- xgb.DMatrix(data = train_x, label = train_y)
+dtest  <- xgb.DMatrix(data = test_x, label  = test_y)
+
+# # Lista de conjuntos de datos para monitorear
+watchlist <- list(train = dtrain, test = dtest)
+
+```
+
+```{r XGBOOST FUERTE - Dejar corriendo}
+
+# train_data$default <- factor(train_data$default, levels = c("0", "1"))
+
+# Defino modelo
+# xgb_modelo_optimizable <- boost_tree(
+#   mode = "classification",
+#   engine = "xgboost",
+#   learn = tune())
+
+# # Defino k-folds
+# set.seed(123)
+# cv_folds <- vfold_cv(train_data, v = 5)
+
+# # Defino receta
+# xgb_recipe <- recipe(default ~ ., data = train_data)  %>%
+#   step_dummy(all_nominal_predictors(), one_hot = TRUE)
+
+# # Defino grilla para learning_rate
+# grid_xgb_1 <- grid_max_entropy(
+#   learn_rate(),
+#   size = 50)
+
+# # Defino primer workflow
+# wf_xgb <- workflow() %>%
+#   add_model(xgb_modelo_optimizable) %>%
+#   add_recipe(xgb_recipe)
+
+# # Tuneo
+# set.seed(123)
+# tune_xgb <- tune_grid(
+#   wf_xgb,
+#   resamples = cv_folds,
+#   grid = grid_xgb_1,
+#   metrics = metric_set(roc_auc),
+#   control = control_grid(verbose = T))
+
+# Realizo una segunda iteración para encontrar otros óptimos
+
+# Selecciono los modelos posibles
+# mejores_xgb <- tune_xgb %>%
+#   collect_metrics() %>%
+#   arrange(-mean)
+
+# Utilizo el mejor learning rate para actualizar el modelo anterior
+# xgb_2 <- xgb_modelo_optimizable %>%
+#   set_args(
+#     learn_rate = tune(),
+#     tree_depth = tune(),
+#     loss_reduction = tune(),
+#     stop_iter = tune()
+#   )
+
+# Nuevo workflow
+# wf_xgb_2 <- wf_xgb %>%
+#   update_model(xgb_2)
+
+# # Segunda grilla:
+# set.seed(123)
+# grid_xgb_2 <- grid_random(
+#   learn_rate(),
+#   tree_depth(),
+#   loss_reduction(),
+#   stop_iter(),
+#   size = 300)
+
+# # Tuneamos por segunda vez:
+# tune_xgb_2 <- tune_grid(
+#   wf_xgb_2,
+#   resamples = cv_folds,
+#   grid = grid_xgb_2,
+#   metrics = metric_set(roc_auc),
+#   control = control_grid(verbose = TRUE)
+# )
+
+# best_metrics_1 <- tune_xgb_2 %>% collect_metrics() %>% arrange(-mean)
+
+```
+
+```{r ajuste manual del XGBoost, fig.cap="AUC Para hiperparámetros de XGBoost"}
+
+# La función para ajustar el modelo es xgb_auc(x)
+
+# # Grilla para itinerar parámetros
+# manual_grid_xgb <- expand.grid(
+#   nrounds = c(300, 500, 1000),
+#   max_depth = c(50, 100),
+#   eta = seq(0.001, 0.1, 0.005),
+#   subsample = 0.8,
+#   colsample_bytree = 0.05,
+#   gamma = 0)
+ 
+# # # Aplicar funcion
+# manual_grid_xgb$auc = map_dbl(1:nrow(manual_grid_xgb),
+#       ~xgb_auc(
+#         nrounds = manual_grid_xgb$nrounds[.x],
+#         max_depth = manual_grid_xgb$max_depth[.x],
+#         eta = manual_grid_xgb$eta[.x],
+#         subsample = manual_grid_xgb$subsample[.x],
+#         colsample_bytree = manual_grid_xgb$colsample_bytree[.x],
+#         gamma = manual_grid_xgb$gamma[.x]
+#       ))
+ 
+# manual_grid_xgb %>%
+#   arrange(-auc) %>%
+#   head(n = 1)
+ 
+# write_delim(manual_grid_xgb, "Data/grid_xgb.txt", delim = "\t")
+manual_grid_xgb <- read_delim("Data/grid_xgb.txt", delim = "\t")
+
+manual_grid_xgb %>%
+  mutate(max_depth = paste0("Max. depth: ", max_depth)) %>% 
+  ggplot() +
+  aes(x = eta, y = auc, color = factor(nrounds)) +
+  geom_line(lwd=.8) +
+  geom_point(size = 2) +
+  facet_grid(~ max_depth) +
+  scale_color_manual(values = mate_pal) +
+  ylab("AUC")+ 
+  guides(color = guide_legend(title = "nrounds: "))
+  
+```
+
+Se elige finalmente el XGBoost con parámetros *eta = 0.006, nrounds = 1000, max_depth = 50, subsample = 0.8, colsample_bytree = 0.05,* con un *AUC = 0.750* en el conjunto de prueba y *AUC = 0.765* en el conjunto de validación.
+
+```{r Modelo final XGBoost}
+
+# XGBoost Modelo final
+# params_xgb <- list(
+#   objective        = "binary:logistic",
+#   eval_metric      = "auc",
+#   max_depth        = 50,
+#   eta              = 0.006,
+#   gamma            = 0,
+#   subsample        = 0.8,
+#   colsample_bytree = 0.05
+# )
+# 
+# # Ajustar el modelo
+# xgboost <- xgb.train(
+#   params    = params_xgb,
+#   data      = dtrain,
+#   nrounds   = 1000,
+#   watchlist = watchlist,  # Lista de conjuntos de datos para monitorear
+#   verbose   = 0,           # Nivel de verbosidad
+# )
+
+# save(xgboost, file = "Modelos/xgboost_model.RData")
+load("Modelos/xgboost_model.RData")
+
+# Evaluar predicciones
+predictions_xgboost <- predict(xgboost, val_x, type = "prob")
+
+metricas_finales <- rbind(metricas_finales, 
+                      calcular_metricas("XGBOOST", 
+                                  y_real = as.numeric(as.character(val_y)),
+                                  y_prob = predictions_xgboost,
+                                  cutoff = 0.087))
+
+```
+
+#### Light GBM
+Es una variante de Gradient Boosting, donde el árbol crece hoja por hoja en lugar de hacerlo por profunidad o nivel. En general, tiene una velocidad de entrenamiento más rápida y más precisión (al dividir por hojas en lugar de por niveles). Los parámetros a optimizar serán en primer lugar el *learning rate*, luego se buscarán los mejores valores para *feature_fraction* y *num leaves*
+
+```{r preparación de los datos}
+dtrain_lgb <- lgb.Dataset(data = train_x, label = train_y)
+dtest_lgb  <- lgb.Dataset(data = test_x, label = test_y, reference = dtrain_lgb)
+
+```
+
+```{r hiperparametrización manual, fig.cap = "AUC para hiperparámetros de LGBM"}
+
+# Genero la grilla de hiperparámetros
+grid_lgbm <- expand.grid(
+  num_leaves       = c(50, 100, 300),
+  learning_rate    = seq(0.001, 0.1, 0.005),
+  feature_fraction = c(0.10, 0.5, 0.6),
+  bagging_fraction = 0.8,
+  max_depth        = c(10, 50, 100),
+  min_data_in_leaf = c(1, 10),
+  nrounds          = c(100, 500, 1000))
+
+# Loopeo para encontrar los mejores (con validación cruzada)
+
+# for (i in 1:nrow(grid_lgbm)) {
+# params <- list(
+#   objective        = "binary",
+#   metric           = "auc",
+#   num_leaves       = grid_lgbm$num_leaves[i],
+#   learning_rate    = grid_lgbm$learning_rate[i],
+#   feature_fraction = grid_lgbm$feature_fraction[i],
+#   bagging_fraction = grid_lgbm$bagging_fraction[i],
+#   max_depth        = grid_lgbm$max_depth[i],
+#   min_data_in_leaf = grid_lgbm$min_data_in_leaf[i],
+#   feature_pre_filter = FALSE
+# )
+# 
+# 
+# # Realizar el entrenamiento con validación cruzada
+# cv <- lgb.cv(
+#   params                = params,
+#   data                  = dtrain_lgb,
+#   nrounds               = grid_lgbm$nrounds[i],
+#   nfold                 = 5,
+#   verbose               = -1,
+#   early_stopping_rounds = 10,
+#   eval                  = "auc"
+# )
+# 
+# grid_lgbm$auc[i] <- cv$best_score
+# 
+# print(paste(round(i / nrow(grid_lgbm), 4) * 100, "%"))
+# }
+
+# grid_lgbm %>% arrange(-auc) %>% head(n=1)
+
+# write_delim(grid_lgbm, file = "Data/grid_lgbm.txt", delim = "\t")
+grid_lgbm <- read_delim("Data/grid_lgbm.txt", delim = "\t")
+
+# Plot
+# grid_lgbm %>% 
+#   mutate(nrounds = factor(paste0("nrounds: ", nrounds), labels = c("nrounds: 100", "nrounds: 500", "nrounds: 1000"))) %>% 
+#   ggplot() + 
+#   aes(x = learning_rate, 
+#       y = auc, 
+#       col = factor(feature_fraction), 
+#       alpha = factor(num_leaves),
+#       shape  = factor(min_data_in_leaf)) +
+#   geom_point() +
+#   scale_color_manual(values = mate_pal) +
+#   facet_wrap(~ nrounds) +
+#   xlab("L. Rate") +
+#   ylab("AUC") +
+#   guides(color = guide_legend(title = "feature_fraction: "), 
+#          alpha = guide_legend(title = "num_leaves: "),
+#          shape = guide_legend(title = "min_data_in_leaf: ")) %>% 
+#   theme(axis.text.x = element_text(angle =90))
+
+# num_leaves       = c(50, 100, 300),
+# feature_fraction = c(0.10, 0.5, 0.6),
+# max_depth        = c(10, 50, 100),
+# min_data_in_leaf = c(1, 10),
+# nrounds          = c(100, 500, 1000)
+
+grid_lgbm %>% 
+  filter(feature_fraction == 0.5) %>% 
+  mutate(max_depth = factor(paste0("max_depth: ", max_depth), levels = c("max_depth: 10", "max_depth: 50","max_depth: 100"), ordered = T)) %>% 
+  ggplot() + 
+  aes(x = learning_rate, y = auc, alpha = factor(nrounds), col = factor(num_leaves), shape = factor(min_data_in_leaf)) + 
+  geom_line(lwd = .85) +
+  geom_point(size = 1.2) +
+  facet_wrap(~ max_depth) +
+  scale_color_manual(values = mate_pal) +
+  xlab("L. Rate") +
+  ylab("AUC") +
+  guides(color = guide_legend(title = "Num leaves: "),
+         alpha = guide_legend(title = "Nrounds: "),
+         shape = guide_legend(title = "Min data in leaf: ")) +
+  theme(axis.text.x = element_text(angle =90))
+
+
+```
+
+El mejor modelo hallado es aquel con *learning_rate = 0.021*, *num_leaves = 50* y *feature_fraction = 0.5*. Su AUC es de 0.781 en el conjunto de validación y 0.784 en el conjunto de validación. El resto de los parámetros del modelo son *bagging_fraction = 0.8*, *max_depth = 10* y *min_data_in_leaf = 1* que mejoren el AUC.
+
+```{r LGBM Final}
+# params_lgb <- list(
+#   objective        = "binary",
+#   metric           = "auc",
+#   num_leaves       = 50,
+#   learning_rate    = 0.021,
+#   feature_fraction = 0.5,
+#   bagging_fraction = 0.8,
+#   max_depth        = 10,
+#   min_data_in_leaf = 1
+# )
+
+# Lista de conjuntos de datos para monitorear
+# valids <- list(train = dtrain_lgb, test = dtest_lgb)
+
+# Ajustar el modelo LightGBM
+# lightgbm <- lgb.train(
+#   params  = params_lgb,
+#   data    = dtrain_lgb,
+#   nrounds = 100,
+#   valids  = valids,  # Lista de conjuntos de datos para monitorear
+#   verbose = 0        # Nivel de verbosidad
+# )
+
+# save(lightgbm, file = "Modelos/lightgbm_modelo_1.RData")
+load("Modelos/lightgbm_modelo_1.RData")
+predictions_lgbm <- predict(lightgbm, val_x, type = "response")
+
+metricas_finales <- rbind(metricas_finales, 
+                      calcular_metricas("LightGBM", 
+                                  y_real = as.numeric(as.character(val_y)),
+                                  y_prob = predictions_lgbm,
+                                  cutoff = 0.087))
+
+write_delim(metricas_finales, "Data/metricas_finales_1.txt")
+
+```
+
+```{r tabla de metricas finales}
+metricas_finales <- metricas_finales %>%
+  mutate(across(is.numeric, ~round(., 2)))
+
+kable(metricas_finales, format = "markdown")
+
+```
+
+```{r grafico ultimos modelos, fig.cap="Cómparación de algoritmo Light GBM sobre distintos conjuntos de datos"}
+metric_df <- read_delim("Data/data_variables_transformadas.txt")
+metric_df %>% 
+  ggplot() +
+  aes(y = modelo, x = auc_mean) + 
+  geom_point(color = mate_pal[1], size = 3) +
+  geom_errorbar(color = mate_pal[2],  lwd = .5, aes(xmin = auc_mean - auc_sd, xmax = auc_mean + auc_sd)) +
+  xlab("AUC") +
+  ylab("Modelo")
+
+
+```
+
+
+# Selección del modelo final y elección del punto de corte
+Considerando que el costo de entregar un crédito y que el cuit caiga en default es de 5 créditos otorgados correctamente, se pueden plantear las siguientes funciones, siendo *FN(p): Cant. de falsos negativos* y *VN(p): Cant. de verdaderos negativos* y *p: punto de corte*, y *C es Costo*, *I es Ingreso* y *B Beneficio*: $C(p) = 5FN(p)$, $I(p) = VP(p)$, $B(p) = VN(p) - 5*FN(p)$. 
+
+En primer lugar se elegirá el mejor modelo entre los ajustados, siendo el elegido el basado en el algoritmo LightGBM, con variables transformadas y sin estandarizar, según las medidas de clasificación dispuestas en la figura 11. 
+Considerando el mejor modelo (Light GBM) las funciones asociadas a cada valor de P se pueden observar en la figura 12, encontrando una probabilidad de corte de 0.20 como mejor clasificador si el objetivo es maximizar los beneficios con la función planteada anteriormente.  
+
+  
+  
+```{r seleccion del mejor modelo y tuneo de cutoff, fig.cap = "Optimización de costo y beneficio"}
+
+optimizacion_p_modelo <- data.frame(p = seq(0.05, 0.64, 0.01))
+
+optimizacion_p_modelo$F1 <- map_dbl(1:nrow(optimizacion_p_modelo),
+                                     ~ calcular_metricas("MODELO: LGBM", 
+                                                        y_real = as.numeric(as.character(val_y)),
+                                                        y_prob = predictions_lgbm,
+                                                        cutoff = optimizacion_p_modelo$p[.x])[,9])
+
+# Ahora realicemos una función que devuelva el costo de clasificar
+# mal un defaultero (5 * cant. default mal clasificados)
+
+optimizacion_p_modelo$Costo <- map_dbl(1:nrow(optimizacion_p_modelo),
+                                        ~costear_predicciones(y_original = as.numeric(as.character(val_y)),
+                                                              y_pred = predictions_lgbm,
+                                                              cutoff = optimizacion_p_modelo$p[.x]))
+
+optimizacion_p_modelo$Beneficio <- map_dbl(1:nrow(optimizacion_p_modelo),
+                                        ~it_predicciones(y_original = as.numeric(as.character(val_y)),
+                                                              y_pred = predictions_lgbm,
+                                                              cutoff = optimizacion_p_modelo$p[.x]))
+
+optimizacion_p_modelo %>% 
+  pivot_longer(-p, names_to = "metrica", values_to = "valor") %>% 
+  ggplot(aes(x = p, y = valor, col = metrica)) + 
+  geom_line(lwd = .95) +
+  scale_color_manual(values = mate_pal) + 
+  facet_wrap(~metrica, scales = "free") + 
+  guides(color = guide_legend(title="Función: ")) 
+  
+```
+
+## Conclusiones y uso del modelo para futuros préstamos
+Se analizaron 18.006 observaciones de 15 variables y sus transformaciones a los efectos de encontrar la mejor regla de clasificación entre deudores que cayeron en default y los que no, en julio del 2019. El conjunto de datos, en general, se caracterizó por tener una baja participación de deudores en default y de deudores con garantía.  
+Asimismo, la proporcón de la media en situación 1 entre diciembre del 2018 y junio de 2019 es una variable relevante, dado que modifica las chances la impagabilidad. La garantía de la deuda es otra variable relevante, que reduce las chances de impagabilidad.   
+Se evaluaron 6 algoritmos, siendo el algoritmo Light GBM el mejor hallado con un AUC de 0.78. Sin embargo, esto es menos del 1 % mejor que la regresión logística.  
+Luego, se optimizó el criterio de clasificación, identificando que para $p = 0.20$ se maximiza los beneficios, mientras que $p = 0.05$ minimiza el costo.   
+Dado que el modelo incluye información sobre el comportamiento histórico reciente de los cuit y las medidas de clasificación son las mejores encontradas con los datos disponibles, no debería ser utilizado para evaluar futuros créditos, dado que se debería contar con características *más estructurales*. Es decir, con atributos de los propietarios más invariantes en el tiempo, como ser historiales crediticios de los últimos años, ingresos anuales, patrimonio, etc. 
+Por último, el mejor modelo basado en el algoritmo Light GBM sin incorporar las variables transformadas arroja un AUC máximo de 0.77.
