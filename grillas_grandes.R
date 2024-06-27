@@ -6,11 +6,6 @@ library(knitr)
 library(gridExtra)
 
 # Modelos y ML
-library(rpart)
-library(rpart.plot) 
-library(partykit)
-# install.packages("CHAID", repos="http://R-Forge.R-project.org")
-library(CHAID)
 library(gbm)
 library(xgboost)
 library(lightgbm)
@@ -21,36 +16,16 @@ library(Metrics)
 
 # Funciones y fuentes
 source("funciones_utiles.R")
-library(extrafont)
-library(ggtext)
-library(showtext)
-showtext_auto()
-
-# Formato de gráficos
-theme_set(
-  theme_bw() +
-    theme(
-      plot.title = element_text(face = "bold", hjust = 0.5, size = 11),
-      legend.position = "bottom", 
-      text = element_text(size = 11, family = "Crimson Text"),
-      axis.text.x = element_text(size = 11),
-      strip.text = element_text(color = "black"),
-      strip.background = element_blank()
-    )
-)
 
 mate_pal <- c("#3B5998", "#FFA500", "#6B8E23", "#A52A2A", "#8A2BE2", "#DAA520", "#708090")
 
 df <- read_delim("Data/deudores_limpio.txt", delim = "\t")
 df_transformado <- read_delim("Data/deudores_limpio_transformaciones.txt", delim = "\t")
 
-df$max_sit_mes_sin_garantia <- NULL
 df$tipo_persona <- factor(df$tipo_persona)
-df_transformado$max_sit_mes_sin_garantia <- NULL
 df_transformado$tipo_persona <- factor(df_transformado$tipo_persona)
 df <- data.frame(df)
 df_transformado <- data.frame(df_transformado)
-
 minmax = function(x) (x - min(x)) / (max(x) - min(x))
 
 # escalamos
