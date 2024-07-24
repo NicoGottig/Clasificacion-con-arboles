@@ -97,9 +97,9 @@ Por último, se describen las medidas de clasificación de los modelos, seleccio
 ## Análisis descriptivo 
 Algunas consideraciones:  
 
-* Se reagruparon los cuits que empiezan con 23 o 24 en una única categoría "global" para facilitar la interpretación en el análisis descriptivo y porque la categoría *24* tiene sólo 90 casos.  
+* Se reagruparon los cuits que empiezan con "23" o "24" en una única categoría "global" para facilitar la interpretación en el análisis descriptivo y porque la categoría "24" tiene sólo 90 casos.  
 
-* Sólo hay valores nulos en la maxima situación de deudas garantizadas y no garantizadas. En las garantizadas hay muchos más valores nulos porque sólo el 1.9 % del total de cuits tiene garantías. Se decide eliminar la variable 'max_sit_mes_con_garantía' que tiene el 97.3 % de los casos nulos y la variable 'max_sit_mes_sin_garantia' dado que algunos modelos tuvieron problemas de convergencia, y es preferible a eliminar los casos pudiendo sesgar los parámetros.   
+* Sólo hay valores nulos en la maxima situación de deudas garantizadas y no garantizadas. En las garantizadas hay muchos más valores nulos porque sólo el 1.9 % del total de cuits tiene garantías. Se decide eliminar la variable 'max_sit_mes_con_garantía' que tiene el 97.3 % de los casos nulos y la variable 'max_sit_mes_sin_garantia' dado que algunos modelos tuvieron problemas de convergencia, y es preferible a eliminar los casos pudiendo sesgar los parámetros. Los modelos incluyeron el ajute con y sin la variable 'max_sit_mes_sin_garantia', siendo su aporte nada notable en las métricas de interés.     
 
 * Hay 2 personas extranjeras que no se consideran en el análisis (DNI 60 millones) por su escaza participación relativa en el conjunto de datos.
 
@@ -187,9 +187,9 @@ rpart.plot(cart_ejemplo)
 ```
 
 ## Comparación de modelos CART y CHAID
-Se eliminan todas las variables medidas en miles de pesos (dadas las características económicas del país y su rápido efecto en la mesura de los créditos obtenidos en el tiempo) y las variables observadas el mes anterior al default. Se itera sobre los parámetros *cp* que determina la complejidad del modelo en el caso del algoritmo CART y sobre valores de alpha para el algoritmo CHAID (previamente se categorizan todas las variables continuas en deciles).   
+Se eliminan todas las variables medidas en miles de pesos (dadas las características económicas del país y su rápido efecto en la mesura de los créditos obtenidos en el tiempo) y las variables observadas el mes anterior al default. Se itera sobre los parámetros *cp* que determina la complejidad del modelo en el caso del algoritmo CART y sobre valores de *alpha* para el algoritmo CHAID (previamente se categorizan todas las variables continuas en deciles).   
 
-Además, se divide el conjunto de datos en un conjunto de entrenamiento (70 %) uno de prueba (20 %) con el que se buscarán los mejores parámetros y uno de validación (10 %) con el que se expondrán los resultados finales.  
+Además, se divide el conjunto de datos en un conjunto de entrenamiento (70 %) uno de prueba (20 %) con el que se buscarán los mejores parámetros y uno de validación (10 %) con el que se expondrán los resultados finales (tablas).  
 
 ```{r Eliminiación de variables}
 # Se borran las variables de plata
@@ -405,6 +405,8 @@ formula_logistica <- formula(default ~ prop_mora_30_dias_seg_sqrt+proxy_edad_act
 reg_lineal_final <- glm(formula_logistica,
                         family = binomial(link = "logit"),
                         data = train_data)
+
+save(reg_lineal_final, file = "Modelos/modelo_binomial.RData")
 
 coef_data <- tidy(reg_lineal_final, conf.int = TRUE, exponentiate = TRUE)
 coef_data <- coef_data %>% arrange(desc(abs(estimate)))
@@ -1042,10 +1044,8 @@ metric_df %>%
 # Selección del modelo final y elección del punto de corte
 Considerando que el costo de entregar un crédito y que el cuit caiga en default es de 5 créditos otorgados correctamente, se pueden plantear las siguientes funciones, siendo *FN(p): Cant. de falsos negativos* y *VN(p): Cant. de verdaderos negativos* y *p: punto de corte*, y *C es Costo*, *I es Ingreso* y *B Beneficio*: $C(p) = 5FN(p)$, $I(p) = VP(p)$, $B(p) = VN(p) - 5*FN(p)$. 
 
-En primer lugar se elegirá el mejor modelo entre los ajustados, siendo el elegido el basado en el algoritmo LightGBM, con variables transformadas y sin estandarizar, según las medidas de clasificación dispuestas en la figura 11. 
-Considerando el mejor modelo (Light GBM) las funciones asociadas a cada valor de P se pueden observar en la figura 12, encontrando una probabilidad de corte de 0.20 como mejor clasificador si el objetivo es maximizar los beneficios con la función planteada anteriormente.  
-
-  
+En primer lugar se elegirá el mejor modelo entre los ajustados. También se analizaron distintos algoritmos sobre el conjuntos de datos sin variables transformadas, estandarizado, y con variables agrupadas con métodos multivariados. Sin embargo, la mejor capacidad predictiva se obtuvo en el conjunto de datos que incluye las transformaciones no lineales. En este conjunto, el mejor algoritmo es el LightGBM (figura 11).   
+Considerando el mejor modelo (Light GBM) las funciones asociadas a cada valor de P se pueden observar en la figura 12, encontrando una probabilidad de corte de 0.20 como mejor clasificador si el objetivo es maximizar los beneficios con la función planteada anteriormente.    
   
 ```{r seleccion del mejor modelo y tuneo de cutoff, fig.cap = "Optimización de costo y beneficio"}
 
@@ -1080,10 +1080,13 @@ optimizacion_p_modelo %>%
   
 ```
 
-## Conclusiones y uso del modelo para futuros préstamos
+## Conclusiones y uso del modelo para futuros préstamos  
+
 Se analizaron 18.006 observaciones de 15 variables y sus transformaciones a los efectos de encontrar la mejor regla de clasificación entre deudores que cayeron en default y los que no, en julio del 2019. El conjunto de datos, en general, se caracterizó por tener una baja participación de deudores en default y de deudores con garantía.  
 Asimismo, la proporcón de la media en situación 1 entre diciembre del 2018 y junio de 2019 es una variable relevante, dado que modifica las chances la impagabilidad. La garantía de la deuda es otra variable relevante, que reduce las chances de impagabilidad.   
 Se evaluaron 6 algoritmos, siendo el algoritmo Light GBM el mejor hallado con un AUC de 0.78. Sin embargo, esto es menos del 1 % mejor que la regresión logística.  
 Luego, se optimizó el criterio de clasificación, identificando que para $p = 0.20$ se maximiza los beneficios, mientras que $p = 0.05$ minimiza el costo.   
 Dado que el modelo incluye información sobre el comportamiento histórico reciente de los cuit y las medidas de clasificación son las mejores encontradas con los datos disponibles, no debería ser utilizado para evaluar futuros créditos, dado que se debería contar con características *más estructurales*. Es decir, con atributos de los propietarios más invariantes en el tiempo, como ser historiales crediticios de los últimos años, ingresos anuales, patrimonio, etc. 
 Por último, el mejor modelo basado en el algoritmo Light GBM sin incorporar las variables transformadas arroja un AUC máximo de 0.77.
+
+
