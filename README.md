@@ -16,3 +16,5 @@ Este proyecto utiliza modelos basados en árboles para clasificar a los prestata
 ## Contacto
 
 Para preguntas o sugerencias, contactate a mi [Correo](mailto:nicolassgottig@gmail.com)
+
+---
