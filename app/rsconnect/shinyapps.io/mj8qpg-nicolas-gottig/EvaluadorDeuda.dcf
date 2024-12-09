@@ -1,0 +1,12 @@
+name: EvaluadorDeuda
+title: EvaluadorDeuda
+username: mj8qpg-nicolas-gottig
+account: mj8qpg-nicolas-gottig
+server: shinyapps.io
+hostUrl: https://api.shinyapps.io/v1
+appId: 12479438
+bundleId: 9005556
+url: https://mj8qpg-nicolas-gottig.shinyapps.io/EvaluadorDeuda/
+version: 1
+asMultiple: FALSE
+asStatic: FALSE

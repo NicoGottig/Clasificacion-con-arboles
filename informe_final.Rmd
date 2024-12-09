@@ -539,6 +539,8 @@ tune_res_df %>%
   ylab("Promedio de la métrica") +
   theme(legend.position = "none")
 
+write_delim(tune_res_df, file = "c:/Users/sikno/Desktop/shiny modelo/app/grid_randomforest.txt", delim = "\t")
+
 ```
 
 En la figura 7 (los colores representan intervalos del AUC) se exponen 300 modelos con distintos hiperparámetros y sus resultados en FC y AUC. Es notable que menos variables mejoran la capacidad predictiva general (AUC), siendo el mejor modelo aquel con 5 variables. Los incrementos en la cantidad de datos necesarios para dividir un nodo también mejoran el AUC, mientras que la relación con la cantidad de árboles es menos distinguible. Se realiza una segunda iteración manteniendo fija la cantidad de variables:    
@@ -976,7 +978,7 @@ grid_lgbm %>%
          shape = guide_legend(title = "Min data in leaf: ")) +
   theme(axis.text.x = element_text(angle =90))
 
-
+write_delim(grid_lgbm, file = "c:/Users/sikno/Desktop/shiny modelo/app/grid_lgbm.txt", delim = "\t")
 ```
 
 El mejor modelo hallado es aquel con *learning_rate = 0.021*, *num_leaves = 50* y *feature_fraction = 0.5*. Su AUC es de 0.781 en el conjunto de validación y 0.784 en el conjunto de validación. El resto de los parámetros del modelo son *bagging_fraction = 0.8*, *max_depth = 10* y *min_data_in_leaf = 1* que mejoren el AUC.
@@ -1077,6 +1079,8 @@ optimizacion_p_modelo %>%
   scale_color_manual(values = mate_pal) + 
   facet_wrap(~metrica, scales = "free") + 
   guides(color = guide_legend(title="Función: ")) 
+
+write_delim(optimizacion_p_modelo, "c:/Users/sikno/Desktop/shiny modelo/app/optimizacion_modelo.txt", delim = "\t")
   
 ```
 
