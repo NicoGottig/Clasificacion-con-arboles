@@ -97,3 +97,15 @@ df$id <- NULL
 
 # Almaceno el dataframe final transformado
 write_delim(df, "Data/deudores_limpio_transformaciones.txt", delim = "\t")
+
+# Para metodos cuantiativos
+
+# Tomar una muestra aleatoria de 500 casos
+muestra_df <- sample_n(df, 500)
+
+# Especifica el nombre del archivo de salida
+file_path <- "muestra_df.xlsx"
+
+# Exporta la muestra a un archivo XLSX
+write.xlsx(muestra_df, file = file_path)
+

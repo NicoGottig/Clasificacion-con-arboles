@@ -795,7 +795,7 @@ watchlist <- list(train = dtrain, test = dtest)
 
 ```
 
-```{r ajuste manual del XGBoost, fig.cap="AUC Para hiperparámetros de XGBoost"}
+```{r ajuste manual del XGBoost, fig.cap = "AUC Para hiperparámetros de XGBoost"}
 
 # La función para ajustar el modelo es xgb_auc(x)
 
